@@ -47,6 +47,10 @@ def get_tsd_outputs(df):
 def centered_diff(df,col):
     return(pd.Series(np.gradient(df[col]), name='hourly_growth'))
 
+## helper function to calculate exponential growth rate, meant to calculate for the day time values
+# input: df=dataframe with diel component, col=specififying diel component of particular model, spacing=time between measurements
+def exp_growth(df,col,spacing):
+    return(np.log(df[col]/df[col].shift())/spacing)
 
 ## function to calculate daily average hourly growth
 # input: df=dataframe with cruise data
