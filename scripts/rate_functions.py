@@ -99,3 +99,7 @@ def calc_daily_hourly_growth(cruise):
     cruise_hourly_avg=daily_avg.reset_index()
     cruise_hourly_avg['cruise']=name
     return days_growth, cruise_hourly_avg
+
+
+    ### helper functions used in Zinser simulations experiment
+    
