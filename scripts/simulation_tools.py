@@ -141,6 +141,31 @@ def generate_missing_data(df, p):
     missing_data['pop']='prochloro'
     return(missing_data)
 
+
+## helper function to remove blocks of data
+# inputs: df=dataframe with data to remove (needs Qc_hour column), n=int for block length, percent=percent of data
+# to remove 
+import random
+def generate_missing_chunks(df, n, percent):
+    # create copy of dataframe
+    frame=df.copy()
+    chunks_to_remove = int(percent*frame.shape[0]/n)
+    #split the indices into chunks of length n+2
+    chunks = [list(range(i,i+n+2)) for i in range(0, frame.shape[0]-n)]
+    drop_indices = list()
+    # randomly select chunks to drop
+    for i in range(chunks_to_remove):
+        indices = random.choice(chunks)
+        drop_indices+=indices[1:-1]
+        #remove all chunks which contain overlapping values with indices
+        chunks = [c for c in chunks if not any(n in indices for n in c)]
+    # add new cols and set drop indices to nan
+    frame['with_missing']=frame['Qc_hour']
+    frame.loc[drop_indices, 'with_missing']=np.nan
+    frame['pop']='prochloro'
+    return frame
+
+
 ## helper function to run imputation function and fill in data
 # input: missing_df=dataframe with 'with_missing' column with data removed
 # returns: final_impute=dataframe with imputed data in 'with_missing'
@@ -313,6 +338,7 @@ def plot_productivity(df):
     axs[1].legend(title=f'RMSE: {np.round(rmse,5)}')
 
     plt.tight_layout()
+    return fig,rmse
 
 
 from arch.bootstrap import MovingBlockBootstrap
@@ -403,15 +429,36 @@ def bagging_results(list_dfs):
     # return grouped dataframe
     return(bs_bag)
 
+## Helper function to get error metrics for models
+# inputs: pred=list or series of model predicted values, actual=list or series of actual values
+# returns: rmse, smape, mase
+def error_metrics(pred, actual):
+    # calculate rmse
+    rmse=mean_squared_error(actual, pred, squared=False)
+    
+    # calculate smape
+    a=actual-pred
+    b=(actual+pred)/2
+    smape=np.mean(a/b)
+    
+    # calculate mase
+    mase=np.mean([abs(actual[i] - pred[i]) / 
+             (abs(actual[i] - actual[i - 1]) / 
+              len(actual) - 1) for i in range(1, len(actual))])
+    return rmse, smape, mase
+
 ## helper function to plot bagging results
 # inputs: df=dataframe with bagged results with hour as index. Requires columns: par_mean, NPP_mean, 
 # productivity_mean, productivity_lower_q, productivity_upper_q
 def plot_bagging(df):
     # get days only
     days_only = df.loc[df['par_mean']>0]
-    # calculate RMSE
-    rmse=mean_squared_error(days_only.NPP_mean.values[:-1], days_only.productivity_mean.values[:-1], squared=False)
-
+    # calculate error metrics
+    pred=days_only.productivity_mean.values[:-1]
+    actual=days_only.NPP_mean.values[:-1]
+    # get rmse
+    rmse, smpae, mase=error_metrics(pred, actual)
+    
     # make plot with bagged results
     fig,axs=plt.subplots(figsize=(10,8), nrows=2)
     # plot original and bagged results
@@ -445,8 +492,9 @@ def plot_bagging(df):
 
 ## function to run entire imputation, TSD model, bootstrapping, and bagging workflow
 # inputs: df=dataframe with dataset to generate simulations from, days=int with # days to simulate data for, 
+# model=string to choose model (options are 'baseline', 'STL'),
 # remove=float for proportion of data to remove, runs=int with times to run bootstrapping
-def run_full_model(df, days, remove, runs=100, show_plots=True):
+def run_full_model(df, days, remove, model='STL', runs=100, show_plots=True):
     # create 10 day simulated data for Qc data
     sim_df=generate_simulated(df, days)
 
@@ -464,19 +512,40 @@ def run_full_model(df, days, remove, runs=100, show_plots=True):
         impute_df=sim_df.copy()
         impute_df['with_missing']=impute_df['Qc_hour']
     
-    # get tsd components
-    tsd_df=run_STL(impute_df, 'with_missing')
-    
-    # calculate hourly growth by exponential growth and maintain correct order
-    tsd_df['hourly_growth']=exp_growth(tsd_df, 'diel',2).shift(-1)
-    # calculate hourly productivity
-    rates_df=calc_productivity(tsd_df,'hourly_growth','Qc_hour')
-    
-    # run bootstrapping to get list of new dataframes
-    mbb_df, mbb_data=run_bootstrapping(tsd_df, runs=runs)
+    if model.lower()=='stl':
+        # get tsd components
+        tsd_df=run_STL(impute_df, 'with_missing')
+        
+        # calculate hourly growth by exponential growth and maintain correct order
+        tsd_df['hourly_growth']=exp_growth(tsd_df, 'diel',2).shift(-1)
+        # calculate hourly productivity
+        rates_df=calc_productivity(tsd_df,'hourly_growth','Qc_hour')
+        
+        # run bootstrapping to get list of new dataframes
+        mbb_df, mbb_data=run_bootstrapping(tsd_df, runs=runs)
 
-    # perform bagging on bootstrapped data
-    bagged=bagging_results(mbb_data)
-    ## plot results and return error metrics
-    fig,rmse=plot_bagging(bagged)
-    return(fig, rmse)
+        # perform bagging on bootstrapped data
+        bagged=bagging_results(mbb_data)
+        ## return error metrics of day time values
+        days_only = bagged.loc[bagged['par_mean']>0]
+        # calculate error metrics
+        pred=days_only.productivity_mean.values[:-1]
+        actual=days_only.NPP_mean.values[:-1]
+        rmse, smape, mase=error_metrics(pred, actual)
+    elif model.lower()=='baseline':
+        ## generate simulated data
+        base_growth=exp_growth(impute_df,'with_missing',2).shift(-1)
+        # add to data
+        baseline=impute_df.copy()
+        baseline['hourly_growth']=base_growth
+        # calculate productivity
+        baseline=calc_productivity(baseline, 'hourly_growth','Qc_hour')
+        # calculate error metrics of day time values
+        days_only = baseline.loc[baseline['par']>0]
+        # calculate error metrics
+        pred=days_only.productivity.values[:-1]
+        actual=days_only.NPP.values[:-1]
+        rmse, smape, mase=error_metrics(pred, actual)
+    else: 
+        return('Choose a valid model: STL or baseline')
+    return(rmse, smape, mase)
