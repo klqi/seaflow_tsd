@@ -73,7 +73,7 @@ from statsmodels.tsa.seasonal import seasonal_decompose
 # function to run tsd model n # times based on a specified rolling time (hourly resolution)
 # input: df = dataframe for either pro/syn, period = frequency length (24 hours default), rolling = how often to 
 # rerun the model (1 hour) default, window = number of days for each model run (default = 3 days)
-def rolling_tsd(df, col, period=24, rolling=1, window=3, type='multiplicative'):
+def rolling_tsd(df, col, period=24, rolling=1, window=3, type='multiplicative', extrapolate=False):
     # set start and stop times 
     start = 0
     end = period * window
@@ -89,13 +89,13 @@ def rolling_tsd(df, col, period=24, rolling=1, window=3, type='multiplicative'):
         n_slice = df[start:end]
         # run decomposition
         if (type=='multiplicative'):
-            result = seasonal_decompose(n_slice[col], model=type, period=period)
+            result = seasonal_decompose(n_slice[col], model=type, period=period, extrapolate_trend=extrapolate)
             # save seasonal components as dataframes in list
             result_df = pd.DataFrame(result.seasonal).reset_index()
             trend_df = pd.DataFrame(result.trend).reset_index()
             resid_df = pd.DataFrame(result.resid).reset_index()
         else: 
-            result = seasonal_decompose(np.log(n_slice[col]), model=type, period=period)
+            result = seasonal_decompose(np.log(n_slice[col]), model=type, period=period, extrapolate_trend=extrapolate)
             # save seasonal components as dataframes in list
             result_df = pd.DataFrame(np.exp(result.seasonal)).reset_index()
             trend_df = pd.DataFrame(np.exp(result.trend)).reset_index()
@@ -261,8 +261,9 @@ def plot_diel_cycle(seasonal_df, trend_df, diel_df, cruise_name):
     
 # function to run the TSD model and output results
 # input: df = input dataframe for cruise, show_figs = show plots or not (default False), type=type of decomposition to run
-# (can be log transformed additive or multiplicative, depends on the desired output)
-def run_TSD(df, cruise_name, show_tsd_figs=False,type='multiplicative'):
+# (can be log transformed additive or multiplicative, depends on the desired output),
+# extrapolate= boolean for extrapolating the trend
+def run_TSD(df, cruise_name, show_tsd_figs=False,type='multiplicative', extrapolate=False):
     # drop values with no lat data first to prevent weird interpolation artifacts
     df = df[df['lat'].notnull()].reset_index()
     # run interpolation helper function (linear)
@@ -274,12 +275,12 @@ def run_TSD(df, cruise_name, show_tsd_figs=False,type='multiplicative'):
     diel_df = diel_df.reset_index().drop(columns=['index'])
     # run naive multiplicative seasonal decompose on interpolated df
     if (type=='multiplicative'):
-        result_pro = seasonal_decompose(pro_res['diam_med'], model=type, period=24)
-        result_syn = seasonal_decompose(syn_res['diam_med'], model=type, period=24)
+        result_pro = seasonal_decompose(pro_res['diam_med'], model=type, period=24, extrapolate_trend=extrapolate)
+        result_syn = seasonal_decompose(syn_res['diam_med'], model=type, period=24, extrapolate_trend=extrapolate)
     # run log additive
     else:
-        result_pro = seasonal_decompose(np.log(pro_res['diam_med']), model=type, period=24)
-        result_syn = seasonal_decompose(np.log(syn_res['diam_med']), model=type, period=24)
+        result_pro = seasonal_decompose(np.log(pro_res['diam_med']), model=type, period=24, extrapolate_trend=extrapolate)
+        result_syn = seasonal_decompose(np.log(syn_res['diam_med']), model=type, period=24, extrapolate_trend=extrapolate)
 
     # show results of initial TSD model if True
     if show_tsd_figs:
@@ -289,11 +290,11 @@ def run_TSD(df, cruise_name, show_tsd_figs=False,type='multiplicative'):
         plt.tight_layout()
         plt.show()
     # run model using rolling hourly data on 3 day windows
-    pro_seasonal, pro_trend, pro_resid = rolling_tsd(pro_res, 'diam_med', type=type)
+    pro_seasonal, pro_trend, pro_resid = rolling_tsd(pro_res, 'diam_med', type=type, extrapolate=extrapolate)
     pro_seasonal['pop'] = 'prochloro'
     pro_trend['pop'] = 'prochloro'
     pro_resid['pop'] = 'prochloro'
-    syn_seasonal, syn_trend, syn_resid = rolling_tsd(syn_res, 'diam_med', type=type)
+    syn_seasonal, syn_trend, syn_resid = rolling_tsd(syn_res, 'diam_med', type=type, extrapolate=extrapolate)
     syn_seasonal['pop'] = 'synecho'
     syn_trend['pop'] = 'synecho'
     syn_resid['pop'] = 'synecho'

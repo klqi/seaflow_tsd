@@ -18,6 +18,7 @@ from rate_functions import *
 
 ## helper function to generate simulated dataset from Zinser experiment
 # input: df=dataframe with hour column to repeat days with, days=integer to specify number of days to extend
+# output: returns a dataframe with new simulated data
 def generate_simulated(df, days):
     # generate simulated dataset (original is 2 days long, so multiply by half- currently only works for even days)
     sim_df=pd.concat([df[:-1]]*int(days/2)).reset_index().drop(columns=['index'])
@@ -347,8 +348,9 @@ from numpy.random import RandomState
 
 ## helper function to run bootstrapping desired number of times to calculate growth and productivity
 # inputs: df=dataframe with columns: hour, resid, trend, diel to generate new bootstrapped time series dfs, 
+# model: string to determine whihc model to run ('STL', 'rolling'),
 # seed=int for random state, period=int for defining block length, runs=int for number of times to run bootstrap
-def run_bootstrapping(df, seed=123, period=13, runs=100):
+def run_bootstrapping(df, model='STL', seed=123, period=13, runs=100):
     ## apply mbb to residuals of STL decomposition
     mbb_df=df.set_index('hour')
     data=mbb_df.resid.values
@@ -369,8 +371,15 @@ def run_bootstrapping(df, seed=123, period=13, runs=100):
         # store in mbb_df as a column
         mbb_df['mbb_qc']=new_ts
         ## run decomposition to calculate growth rate
-        # get tsd components
-        mbb_tsd=run_STL(mbb_df.reset_index(), 'mbb_qc')
+        # get tsd components from chosen model
+        if model.lower().startswith('s'):
+            mbb_tsd=run_STL(mbb_df.reset_index(), 'mbb_qc')
+        elif model.lower().startswith('roll'):
+            mbb_tsd=rolling_tsd(mbb_df.set_index('hour'), 'mbb_qc', period=12,
+                                                 window=3, type='multiplicative', extrapolate=True)
+        else:
+            print('Please choose a model!')
+            return
         # calculate hourly growth by exponential growth and maintain correct order
         mbb_tsd['hourly_growth']=exp_growth(mbb_tsd, 'diel',2).shift(-1)
         # add column to keep track of bootstrap run
@@ -437,25 +446,40 @@ def error_metrics(pred, actual):
     rmse=mean_squared_error(actual, pred, squared=False)
     
     # calculate smape
-    a=actual-pred
-    b=(actual+pred)/2
-    smape=np.mean(a/b)
+    a=abs(actual-pred)
+    b=(abs(actual)+abs(pred))/2
+    smape=np.mean(a/b)*100
     
+    ## calculate mase
+    ## first calculate naive seasonal mae
+    # reset indices for actual series
+    mase_actual=actual.reset_index()
+    # get index for start
+    start_m=mase_actual.loc[mase_actual['hour']>=24].index[0]
+    # get hours to search
+    hours = mase_actual.loc[start_m:, 'hour']
+    # get column to search
+    col = [col for col in mase_actual if col.startswith('NPP')][0]
+    naive_ae=[]
+    # loop through each hour
+    for i in hours:
+        # get the value starting 24 hours later
+        curr=mase_actual.loc[mase_actual['hour']==i, col].values[0]
+        past=mase_actual.loc[mase_actual['hour']==i-24, col].values[0]
+        naive_ae.append(abs(curr-past))
     # calculate mase
-    mase=np.mean([abs(actual[i] - pred[i]) / 
-             (abs(actual[i] - actual[i - 1]) / 
-              len(actual) - 1) for i in range(1, len(actual))])
+    mase=np.mean(abs(actual-pred))/np.mean(naive_ae)
     return rmse, smape, mase
 
 ## helper function to plot bagging results
 # inputs: df=dataframe with bagged results with hour as index. Requires columns: par_mean, NPP_mean, 
-# productivity_mean, productivity_lower_q, productivity_upper_q
-def plot_bagging(df):
+# productivity_mean, productivity_lower_q, productivity_upper_q, model=string defining model name
+def plot_bagging(df,model):
     # get days only
     days_only = df.loc[df['par_mean']>0]
     # calculate error metrics
-    pred=days_only.productivity_mean.values[:-1]
-    actual=days_only.NPP_mean.values[:-1]
+    pred=days_only.productivity_mean[:-1]
+    actual=days_only.NPP_mean[:-1]
     # get rmse
     rmse, smpae, mase=error_metrics(pred, actual)
     
@@ -474,7 +498,7 @@ def plot_bagging(df):
     axs[0].set_xlabel('Time (Hours)')
     axs[0].set_ylabel('Hourly C-Fixation (pg C/cell)')
     axs[0].legend()
-    axs[0].set_title('100x Bootstrapped STL Decomposition')
+    axs[0].set_title(f'100x Bootstrapped {model} Decomposition')
 
     # plot comparison of day productivity values
     axs[1].plot(days_only['NPP_mean'],days_only['productivity_mean'],marker='.',linestyle='',label='Comparison')
@@ -488,6 +512,18 @@ def plot_bagging(df):
     # show plot
     # return fig and error metrics 
     return fig, rmse
+
+
+## helper function to sumarize rolling tsd model for bagging
+# inputs: seasonal=series for seasonal component output, trend = series for trend component outut, resid=series for resid component
+def summarize_rolling(seasonal, trend, resid):
+    # join all components
+    all_comp=pd.concat([seasonal, trend, resid], axis=1)
+    # drop duplicates
+    all_comp = all_comp.loc[:,~all_comp.columns.duplicated()]
+    # group by on each hour for mean
+    comp_mean = all_comp.groupby(['hour']).mean().reset_index()
+    return(comp_mean)
 
 
 ## function to run entire imputation, TSD model, bootstrapping, and bagging workflow
@@ -512,7 +548,7 @@ def run_full_model(df, days, remove, model='STL', runs=100, show_plots=True):
         impute_df=sim_df.copy()
         impute_df['with_missing']=impute_df['Qc_hour']
     
-    if model.lower()=='stl':
+    if model.lower().startswith('s'):
         # get tsd components
         tsd_df=run_STL(impute_df, 'with_missing')
         
@@ -529,10 +565,10 @@ def run_full_model(df, days, remove, model='STL', runs=100, show_plots=True):
         ## return error metrics of day time values
         days_only = bagged.loc[bagged['par_mean']>0]
         # calculate error metrics
-        pred=days_only.productivity_mean.values[:-1]
-        actual=days_only.NPP_mean.values[:-1]
+        pred=days_only.productivity_mean[:-1]
+        actual=days_only.NPP_mean[:-1]
         rmse, smape, mase=error_metrics(pred, actual)
-    elif model.lower()=='baseline':
+    elif model.lower().startswith('base'):
         ## generate simulated data
         base_growth=exp_growth(impute_df,'with_missing',2).shift(-1)
         # add to data
@@ -542,10 +578,34 @@ def run_full_model(df, days, remove, model='STL', runs=100, show_plots=True):
         baseline=calc_productivity(baseline, 'hourly_growth','Qc_hour')
         # calculate error metrics of day time values
         days_only = baseline.loc[baseline['par']>0]
+        # set hour to index
+        days_only = days_only.set_index('hour')
         # calculate error metrics
-        pred=days_only.productivity.values[:-1]
-        actual=days_only.NPP.values[:-1]
+        pred=days_only.productivity[:-1]
+        actual=days_only.NPP[:-1]
         rmse, smape, mase=error_metrics(pred, actual)
+    elif model.lower().startswith('roll'):
+        # get components from rolling model
+        pro_seasonal, pro_trend, pro_resid = rolling_tsd(impute_df.set_index('hour'), 'with_missing', period=12,
+                                                        window=3, type='multiplicative', extrapolate=True)
+        pro_all=summarize_rolling(pro_seasonal, pro_trend, pro_resid)
+        pro_all.rename(columns={'seasonal':'diel'}, inplace=True)
+        # get other necessary columns`a
+        pro_all=pd.merge(pro_all, impute_df[['hour','Qc_hour','par','NPP']], on='hour')
+        # calculate growth and productivity
+        pro_all['hourly_growth']=exp_growth(pro_all, 'diel',2).shift(-1)
+        pro_all=calc_productivity(pro_all, 'hourly_growth', 'Qc_hour')
+        # bootstrap model
+        rolling_mbb_df, rolling_mbb_data=run_bootstrapping(pro_all)
+        # perform bagging on bootstrapped data
+        roll_bagged=bagging_results(rolling_mbb_data)
+        # get error metrics
+        days_only = roll_bagged.loc[roll_bagged['par_mean']>0]
+        # calculate error metrics
+        pred=days_only.productivity_mean[:-1]
+        actual=days_only.NPP_mean[:-1]
+        rmse, smape, mase=error_metrics(pred, actual)
+
     else: 
         return('Choose a valid model: STL or baseline')
     return(rmse, smape, mase)
