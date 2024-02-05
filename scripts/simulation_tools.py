@@ -119,13 +119,14 @@ def iteratively_impute(sub_df, col):
     return(sub_df)
 
 ## helper function to generate missing data from Qc column
-# inputs: df=dataframe with "Qc_hourly" column, p = float that specifies % of data to remove
+# inputs: df=dataframe with "Qc_hourly" column, col = column to generate missing data on, 
+# p = float that specifies % of data to remove
 # returns: missing_data=data_frame with new column with data removed
-def generate_missing_data(df, p):
+def generate_missing_data(df, col, p):
     # make copy of dataframe 
     missing_data=df.copy()
     # grab hourly Qc only
-    qc_only=missing_data[['Qc_hour']]
+    qc_only=missing_data[[col]]
     # calculate number of nans to add to data
     n = int(qc_only.shape[0]*p)
     # randomly sample to get indices to remove data
@@ -145,9 +146,10 @@ def generate_missing_data(df, p):
 
 ## helper function to remove blocks of data
 # inputs: df=dataframe with data to remove (needs Qc_hour column), n=int for block length, percent=percent of data
+# col=column to generate missing data on
 # to remove 
 import random
-def generate_missing_chunks(df, n, percent):
+def generate_missing_chunks(df, n, percent, col):
     # create copy of dataframe
     frame=df.copy()
     chunks_to_remove = int(percent*frame.shape[0]/n)
@@ -156,12 +158,15 @@ def generate_missing_chunks(df, n, percent):
     drop_indices = list()
     # randomly select chunks to drop
     for i in range(chunks_to_remove):
+        # check if empty, break if true
+        if len(chunks) == 0:
+            break
         indices = random.choice(chunks)
         drop_indices+=indices[1:-1]
         #remove all chunks which contain overlapping values with indices
         chunks = [c for c in chunks if not any(n in indices for n in c)]
     # add new cols and set drop indices to nan
-    frame['with_missing']=frame['Qc_hour']
+    frame['with_missing']=frame[col]
     frame.loc[drop_indices, 'with_missing']=np.nan
     frame['pop']='prochloro'
     return frame
@@ -266,15 +271,15 @@ def plot_TSD(res, axes, model):
 
 # function to run STL model to first get diel component
 ## input: df=dataframe with imputed data, col=string representation of column with imputed data
-## output: pro_res = dataframe with cleaned tsd components for pro, syn_res=same but with syn
+## output: data = dataframe with cleaned STL components
 def run_STL(df, col, robust=True):
     # subset df 
     data = df[['hour','Qc_hour','par','NPP',col]]
     # get data to run in model
     train=data[col]
     # Run multiplicative STL model
-    period=24
-    stl_model = STL(np.log(train), period=period, robust=robust, seasonal=15)
+    period=12
+    stl_model = STL(np.log(train), period=period, robust=robust)#, seasonal=15)
     # fit to data
     stl_fit = stl_model.fit()
     # make figure
@@ -286,6 +291,26 @@ def run_STL(df, col, robust=True):
     data['diel']=np.exp(stl_fit.seasonal.values.reshape(-1,1))
     data['resid']=np.exp(stl_fit.resid.values.reshape(-1,1))
     # return both components
+    return data
+
+
+# function to run STL model to first get diel component
+## input: df=dataframe with imputed data, col=string representation of column with imputed data
+## output: data = dataframe with cleaned naive tsd components
+def run_naive(df, col):
+    # subset df 
+    data = df[['hour','Qc_hour','par','NPP',col]]
+    # get data to run in model
+    train=data[col]
+    # Run multiplicative naive model
+    period=12
+    model = seasonal_decompose(train, model='multiplicative',period=period, extrapolate_trend=True)
+    
+    # add components to datasets
+    data['trend']=(model.trend.values.reshape(-1,1))
+    data['diel']=(model.seasonal.values.reshape(-1,1))
+    data['resid']=(model.resid.values.reshape(-1,1))
+    # return df
     return data
 
 ## helper function to check stationarity of a time series using adfuller and kpss tests
@@ -526,27 +551,66 @@ def summarize_rolling(seasonal, trend, resid):
     return(comp_mean)
 
 
+## helper function to add gaussian noise by varying std
+# inputs: x=data, mu = mean, std=standard deviation
+# returns: data with noise added
+def gaussian_noise(x,mu,std):
+    noise = np.random.normal(mu, std, size = x.shape)
+    x_noisy = x + noise
+    return x_noisy 
+
 ## function to run entire imputation, TSD model, bootstrapping, and bagging workflow
 # inputs: df=dataframe with dataset to generate simulations from, days=int with # days to simulate data for, 
 # model=string to choose model (options are 'baseline', 'STL'),
-# remove=float for proportion of data to remove, runs=int with times to run bootstrapping
-def run_full_model(df, days, remove, model='STL', runs=100, show_plots=True):
-    # create 10 day simulated data for Qc data
-    sim_df=generate_simulated(df, days)
+# remove=float for proportion of data to remove, runs=int with times to run bootstrapping,
+# noise = float for proportion of noise to add
+def run_full_model(df, days, remove, add_trend=False, trend_df=None,
+                   noise=0, blocks=False, block_len=0, model='STL', runs=100, show_plots=True):
+    # check if running model with trend
+    if add_trend:
+        # use inputted data for model
+        sim_df=trend_df
+        # set column to for further testing
+        col='new_ts'
+    else:
+        # create day simulated data for Qc data
+        sim_df=generate_simulated(df, days)
+        # set column to for further testing
+        col='Qc_hour'
 
+    # first generate noise if prompted
+    if noise > 0:
+        # calculate std to sample from noise
+        x=sim_df[col]
+        # set mean to 0 for gaussian noise
+        mu=0
+        std = noise * np.std(x) 
+        # add noise to data
+        sim_df['with_noise']=gaussian_noise(x,mu,std)
+    # don't generate noise    
+    else:
+        sim_df['with_noise']=sim_df[col]
+    
     # generate missing data if prompted
     if remove > 0:
-        missing=generate_missing_data(sim_df, remove)
+        # generate blocks of missing datam
+        if blocks:
+            # remove block length and amount of data to remove
+            missing=generate_missing_chunks(sim_df, block_len, remove, 'with_noise')
+        else:
+            # generate misisng data at random
+            missing=generate_missing_data(sim_df, 'with_noise', remove)
         # calculate imputed values
         impute_df=run_imputation(missing)
         # check if imputation ran
         if impute_df is None:
             print('Imputation Failed')
             return
-    else: # run STL model on full dataset
+    else: # run STL model on complete dataset (no missing values)
         # add necessary columns
         impute_df=sim_df.copy()
-        impute_df['with_missing']=impute_df['Qc_hour']
+        # replace with noise column (doesn't matter if noise was added or not)
+        impute_df['with_missing']=impute_df['with_noise']
     
     if model.lower().startswith('s'):
         # get tsd components
@@ -555,10 +619,11 @@ def run_full_model(df, days, remove, model='STL', runs=100, show_plots=True):
         # calculate hourly growth by exponential growth and maintain correct order
         tsd_df['hourly_growth']=exp_growth(tsd_df, 'diel',2).shift(-1)
         # calculate hourly productivity
+        # always calculated on original Qc, even with trend, to compare back with 14C results
         rates_df=calc_productivity(tsd_df,'hourly_growth','Qc_hour')
         
         # run bootstrapping to get list of new dataframes
-        mbb_df, mbb_data=run_bootstrapping(tsd_df, runs=runs)
+        mbb_df, mbb_data=run_bootstrapping(rates_df, runs=runs)
 
         # perform bagging on bootstrapped data
         bagged=bagging_results(mbb_data)
@@ -575,15 +640,17 @@ def run_full_model(df, days, remove, model='STL', runs=100, show_plots=True):
         baseline=impute_df.copy()
         baseline['hourly_growth']=base_growth
         # calculate productivity
-        baseline=calc_productivity(baseline, 'hourly_growth','Qc_hour')
+        rates_df=calc_productivity(baseline, 'hourly_growth','Qc_hour')
         # calculate error metrics of day time values
-        days_only = baseline.loc[baseline['par']>0]
+        days_only = rates_df.loc[rates_df['par']>0]
         # set hour to index
         days_only = days_only.set_index('hour')
         # calculate error metrics
         pred=days_only.productivity[:-1]
         actual=days_only.NPP[:-1]
         rmse, smape, mase=error_metrics(pred, actual)
+        # rename rates_df to return properly
+        bagged=rates_df
     elif model.lower().startswith('roll'):
         # get components from rolling model
         pro_seasonal, pro_trend, pro_resid = rolling_tsd(impute_df.set_index('hour'), 'with_missing', period=12,
@@ -594,9 +661,9 @@ def run_full_model(df, days, remove, model='STL', runs=100, show_plots=True):
         pro_all=pd.merge(pro_all, impute_df[['hour','Qc_hour','par','NPP']], on='hour')
         # calculate growth and productivity
         pro_all['hourly_growth']=exp_growth(pro_all, 'diel',2).shift(-1)
-        pro_all=calc_productivity(pro_all, 'hourly_growth', 'Qc_hour')
+        rates_df=calc_productivity(pro_all, 'hourly_growth', 'Qc_hour')
         # bootstrap model
-        rolling_mbb_df, rolling_mbb_data=run_bootstrapping(pro_all)
+        rolling_mbb_df, rolling_mbb_data=run_bootstrapping(rates_df)
         # perform bagging on bootstrapped data
         roll_bagged=bagging_results(rolling_mbb_data)
         # get error metrics
@@ -605,7 +672,27 @@ def run_full_model(df, days, remove, model='STL', runs=100, show_plots=True):
         pred=days_only.productivity_mean[:-1]
         actual=days_only.NPP_mean[:-1]
         rmse, smape, mase=error_metrics(pred, actual)
+    elif model.lower().startswith('n'):
+        # get tsd components
+        tsd_df=run_naive(impute_df, 'with_missing')
+        
+        # calculate hourly growth by exponential growth and maintain correct order
+        tsd_df['hourly_growth']=exp_growth(tsd_df, 'diel',2).shift(-1)
+        # calculate hourly productivity
+        rates_df=calc_productivity(tsd_df,'hourly_growth','Qc_hour')
+        
+        # run bootstrapping to get list of new dataframes
+        mbb_df, mbb_data=run_bootstrapping(rates_df, runs=runs)
+
+        # perform bagging on bootstrapped data
+        bagged=bagging_results(mbb_data)
+        ## return error metrics of day time values
+        days_only = bagged.loc[bagged['par_mean']>0]
+        # calculate error metrics
+        pred=days_only.productivity_mean[:-1]
+        actual=days_only.NPP_mean[:-1]
+        rmse, smape, mase=error_metrics(pred, actual)
 
     else: 
-        return('Choose a valid model: STL or baseline')
-    return(rmse, smape, mase)
+        return('Choose a valid model: baseline, naive, rolling, or STL')
+    return(bagged, rmse, smape, mase)
