@@ -32,7 +32,7 @@ def generate_simulated(df, days):
 def plot_night_day(ax, df, ylims):
     # fill in shading
     ax.fill_between(df['hour'], 0, 1, 
-                    where=df['par'] == 0,color='gray', alpha=0.3, transform=ax.get_xaxis_transform())
+                    where=df['par'] <= 20,color='gray', alpha=0.3, transform=ax.get_xaxis_transform())
     # set y limits
     ax.set_ylim(ylims[0],ylims[1])
     # hide y ticks
@@ -122,7 +122,7 @@ def iteratively_impute(sub_df, col):
 # inputs: df=dataframe with "Qc_hourly" column, col = column to generate missing data on, 
 # p = float that specifies % of data to remove
 # returns: missing_data=data_frame with new column with data removed
-def generate_missing_data(df, col, p):
+def generate_missing_data(df, col, p,missing_col='with_missing'):
     # make copy of dataframe 
     missing_data=df.copy()
     # grab hourly Qc only
@@ -138,7 +138,7 @@ def generate_missing_data(df, col, p):
     # update numpy view with np.nan
     data[idx,idy]=np.nan
     # store column with missing data in dataframe
-    missing_data['with_missing']=data
+    missing_data[missing_col]=data
     # add population column
     missing_data['pop']='prochloro'
     return(missing_data)
@@ -171,18 +171,77 @@ def generate_missing_chunks(df, n, percent, col):
     frame['pop']='prochloro'
     return frame
 
+## helper function to remove randomly sized blocks of data
+# inputs: df=dataframe with data to remove, col=column to remove from,p=proportion of data to remove
+from random import choices
+def generate_random_chunks(df,col,p,missing_col='with_missing'):
+    # make a copy of dataframe
+    frame=df.copy()
+    # set max length of chunk that can be removed
+    max_length = int(len(frame)*p)
+    # set chunk sizes
+    chunk_sizes=np.arange(1,max_length+1)
+    # get data indices
+    inds=frame.index.to_list()
+    # first arbitrarily choose a chunk sizes
+    # need to set limit on chunk sizes based on proportion data removed and dataset length
+    chunk=choices(chunk_sizes)
+    # loop through to generate chunk sizes
+    chunks_to_remove=[]
+    # save
+    chunks_to_remove.append(chunk[0])
+    while max_length>0:
+        # reset max_length
+        max_length=max_length-chunk[0]
+        # generate new chunk with new max length
+        if max_length>0:
+            chunk=choices(np.arange(1,max_length+1))
+            chunks_to_remove.append(chunk[0])
+    # sort chunks
+    sorted_chunks=np.sort(chunks_to_remove)[::-1]
+    
+    ## split indices into chunks
+    # create chunks for each sorted chunk
+    all_chunks = []
+    for n in sorted_chunks:
+        # create chunked dataset
+        chunks = [list(range(i,i+n+1)) for i in range(0, frame.shape[0]-n)]
+        all_chunks.append(chunks)
+
+    # keep track of previously seen indices
+    drop_indices=list()
+    drops=[]
+    for chunk in all_chunks:
+        # check if index is in any of the chunks
+        drops=[x for x in chunk if set(x).intersection(drop_indices)]
+        # create mask and chunks to select from
+        masks=[n not in drops for n in chunk]
+        good_chunk=[b for a, b in zip(masks, chunk) if a]
+        # randomly select indices
+        indices = random.choice(good_chunk)
+        # check if drop index already used
+        if any(x in indices for x in drop_indices):
+            print('repeat!!!!!')
+        # stored
+        drop_indices+=indices[0:-1]
+    # set indices to nan to remove
+    frame[missing_col]=frame[col]
+    frame.loc[drop_indices, missing_col]=np.nan
+    frame['pop']='prochloro'
+    return(frame)
+
 
 ## helper function to run imputation function and fill in data
 # input: missing_df=dataframe with 'with_missing' column with data removed
 # returns: final_impute=dataframe with imputed data in 'with_missing'
-def run_imputation(missing_df):
+def run_imputation(missing_df,col,missing_col='with_missing', period=12, interval=2):
     # create subsetted df excluding nan values 
-    missing_cont=missing_df.loc[missing_df['with_missing'].notna()]
+    missing_cont=missing_df.loc[missing_df[missing_col].notna()]
 
     # run seasonal decomposition on raw data and drop nan values for now
-    train=missing_cont['with_missing']
+    train=missing_cont[missing_col]
     try: 
-        decompose=seasonal_decompose(train, model='multiplicative', period=24, extrapolate_trend='freq')
+        decompose=seasonal_decompose(train, model='multiplicative', period=period, extrapolate_trend='freq')
     except: 
         print('Not enough data for imputation')
         return
@@ -195,24 +254,27 @@ def run_imputation(missing_df):
     # grab first and last hours of complete dataframe
     hour_range=missing_df.iloc[[0,-1]]['hour'].values
     # create resamppled list 
-    resampled=np.arange(hour_range[0],hour_range[1]+1, 2)
+    resampled=np.arange(hour_range[0],hour_range[1]+1, interval)
     # resample interpolated list
     missing_resamp = missing_cont.reindex(missing_cont.index.union(
         resampled)).interpolate('values',limit_direction='both').loc[resampled]
     # add missing diam_med data back to interpolated data
-    missing_resamp['with_missing']=missing_cont['with_missing']
+    missing_resamp[missing_col]=missing_cont[missing_col]
 
     # add flag to check if filled
     missing_resamp['filled']=0
     # iteratively impute
-    pre_impute =iteratively_impute(missing_resamp, 'with_missing')
+    pre_impute =iteratively_impute(missing_resamp, missing_col)
     # fill additional gaps with linear interpolation
     final_impute = pre_impute.reindex(pre_impute.index.union(
         resampled)).interpolate(limit_direction='both',axis=0).loc[resampled].reset_index()
     # replace altered with its original values
-    final_impute['Qc_hour']=missing_df['Qc_hour']
-    final_impute['NPP']=missing_df['NPP']
-    final_impute['par']=missing_df['par']
+    if col.startswith('data'):
+        final_impute[col]=missing_df[col]
+    else:
+        final_impute['Qc_hour']=missing_df['Qc_hour']
+        final_impute['NPP']=missing_df['NPP']
+        final_impute['par']=missing_df['par']
     return(final_impute)
 
 ## helper function to plot imputed data
@@ -272,13 +334,16 @@ def plot_TSD(res, axes, model):
 # function to run STL model to first get diel component
 ## input: df=dataframe with imputed data, col=string representation of column with imputed data
 ## output: data = dataframe with cleaned STL components
-def run_STL(df, col, robust=True):
-    # subset df 
-    data = df[['hour','Qc_hour','par','NPP',col]]
+def run_STL(df, col, period=12, robust=True):
+    # subset df
+    # check what col is
+    if col.startswith('data'):
+        data = df[['hour','time_of_day',col]]
+    else:
+        data = df[['hour','Qc_hour','par','NPP',col]]
     # get data to run in model
     train=data[col]
     # Run multiplicative STL model
-    period=12
     stl_model = STL(np.log(train), period=period, robust=robust)#, seasonal=15)
     # fit to data
     stl_fit = stl_model.fit()
@@ -297,13 +362,18 @@ def run_STL(df, col, robust=True):
 # function to run STL model to first get diel component
 ## input: df=dataframe with imputed data, col=string representation of column with imputed data
 ## output: data = dataframe with cleaned naive tsd components
-def run_naive(df, col):
+def run_naive(df, col,period=12):
     # subset df 
-    data = df[['hour','Qc_hour','par','NPP',col]]
-    # get data to run in model
+    if col.startswith('data'):
+        data = df[['hour','time_of_day',col]]
+    else:
+        data = df[['hour','Qc_hour','par','NPP',col]]
+    # resolve 0 and negative values,
+    data[col]=np.where(data[col]>0, data[col], 
+         np.mean(data[col]))
+    # get data for model
     train=data[col]
     # Run multiplicative naive model
-    period=12
     model = seasonal_decompose(train, model='multiplicative',period=period, extrapolate_trend=True)
     
     # add components to datasets
@@ -375,13 +445,12 @@ from numpy.random import RandomState
 # inputs: df=dataframe with columns: hour, resid, trend, diel to generate new bootstrapped time series dfs, 
 # model: string to determine whihc model to run ('STL', 'rolling'),
 # seed=int for random state, period=int for defining block length, runs=int for number of times to run bootstrap
-def run_bootstrapping(df, model='STL', seed=123, period=13, runs=100):
+def run_bootstrapping(df, model='STL', period=13, runs=100):
     ## apply mbb to residuals of STL decomposition
     mbb_df=df.set_index('hour')
     data=mbb_df.resid.values
     # separate residuals into overlapping blocks
-    rs=RandomState(seed)
-    mbb=MovingBlockBootstrap(period, data, random_state=rs)
+    mbb=MovingBlockBootstrap(period, data)
 
     # grab synthetic datasets in each bootstrap
     mbb_data=[]
@@ -400,8 +469,15 @@ def run_bootstrapping(df, model='STL', seed=123, period=13, runs=100):
         if model.lower().startswith('s'):
             mbb_tsd=run_STL(mbb_df.reset_index(), 'mbb_qc')
         elif model.lower().startswith('roll'):
-            mbb_tsd=rolling_tsd(mbb_df.set_index('hour'), 'mbb_qc', period=12,
-                                                 window=3, type='multiplicative', extrapolate=True)
+            # hour is already index
+            seasonal, trend, resid=rolling_tsd(mbb_df, 'mbb_qc', period=12,
+                                                 window=3, type='log additive', extrapolate=True)
+            mbb_tsd = summarize_rolling(seasonal, trend, resid)
+            mbb_tsd.rename(columns={'seasonal':'diel'}, inplace=True)
+            # get other necessary columns
+            mbb_tsd=pd.merge(mbb_tsd, mbb_df.reset_index()[['hour','Qc_hour','par','NPP']], on='hour')
+        elif model.lower().startswith('n'):
+            mbb_tsd=run_naive(mbb_df.reset_index(), 'mbb_qc')
         else:
             print('Please choose a model!')
             return
@@ -441,27 +517,57 @@ def plot_bootstrapping(mbb_df, list_dfs, runs):
     plt.show()
 
 
-## helper functions for returning 95% confidence interval
+## helper functions for returning 95% confidence interval by quantiles
 def lower_q(x):
     return x.quantile(0.0275)
 
 def upper_q(x):
     return x.quantile(0.975)
 
+## helper function to calculate 95% CI
+def calc_95CI(df, groupby_col, agg_col):
+    # perform groupby
+    stats_df=df.groupby(groupby_col).agg(
+        {
+            agg_col:['mean', 'count', 'std']
+        }
+    )
+    # filter out rows with 0 or nan
+    stats_df=stats_df.loc[(stats_df != 0).all(axis=1), :]
+    # 95% confidence = 1.96x SD from the mean
+    ci95_hi=[]
+    ci95_lo=[]
+    # calculate CI
+    for i in stats_df.index:
+        m, c, s = stats_df.loc[i]
+        ci95_hi.append(m + 1.96*s)
+        ci95_lo.append(m - 1.96*s)
+    # flatten multi index to single
+    stats_df.columns=['_'.join(col).strip() for col in stats_df.columns.values]
+    # set 95 CI columns
+    stats_df[f'{agg_col}_ci95_hi'] = ci95_hi
+    stats_df[f'{agg_col}_ci95_lo'] = ci95_lo
+    # drop count col
+    stats_df=stats_df[stats_df.columns.drop(list(stats_df.filter(regex='count')))]
+    # return dataframe
+    return(stats_df.reset_index())
+
 ## helper function to aggregate bootstrapping results (bagging)
 # inputs: list_dfs=list of bootstrapped dataframes, runs=int with number of bootstrapping runs completed
 def bagging_results(list_dfs):
     ## get bagged results
+    # first concatenate list of dataframes
     bs_all = pd.concat(list_dfs)
-    # calculate mean run and uncertainty (95% confidence interval)
-    f = {'productivity': ['mean', 'std', lower_q, upper_q],
-        'NPP': 'mean',
-        'par': 'mean'}
-    bs_bag = bs_all.groupby('hour').agg(f)
-    # flatten multiindex into single index
-    bs_bag.columns=['_'.join(col).strip() for col in bs_bag.columns.values]
+    # calculate mean run and uncertainty (95% confidence interval) for residuals and productivity
+    # get stats for residuals and productivity
+    resid_stats=calc_95CI(bs_all, 'hour','resid')
+    prod_stats=calc_95CI(bs_all, 'hour','productivity')
+    # merge stats
+    merged_stats=resid_stats.merge(prod_stats)
+    # get NPP and PAR data
+    bs_bag=merged_stats.merge(bs_all.groupby(['hour']).first().reset_index()[['hour','par','NPP']])
     # return grouped dataframe
-    return(bs_bag)
+    return(bs_bag.set_index('hour'))
 
 ## Helper function to get error metrics for models
 # inputs: pred=list or series of model predicted values, actual=list or series of actual values
@@ -496,38 +602,63 @@ def error_metrics(pred, actual):
     mase=np.mean(abs(actual-pred))/np.mean(naive_ae)
     return rmse, smape, mase
 
+
+## Helper function to get error metrics for models by looping through each bootstrapped time series
+# inputs: mbb_dfs=list of dataframes with bootstrapped results (needs productivity and NPP, diel and resid columns)
+# returns: rmse and SNR
+def loop_error_metrics(mbb_dfs):
+    # store rmse and snr
+    rmse_list = []
+    snr_list = []
+    ## calculate SNR from signal (diel component) and noise (residual component)
+    for df in mbb_dfs:
+        ## calculate rmse
+        # get day time values
+        days_only = df.loc[df['par']>0]
+        # get predicted and actual values
+        pred = days_only['productivity'][:-1]
+        actual = days_only['NPP'][:-1]
+        rmse=mean_squared_error(actual, pred, squared=False)
+        # save rmse
+        rmse_list.append(rmse)
+        ## calculate SNR
+        signal=df['diel']
+        noise=df['resid']
+        # save snr
+        snr_list.append(np.var(signal)/np.var(noise))
+    return(rmse_list, snr_list)
+
 ## helper function to plot bagging results
-# inputs: df=dataframe with bagged results with hour as index. Requires columns: par_mean, NPP_mean, 
+# inputs: df=dataframe with bagged results with hour as index. Requires columns: par_mean, NPP, 
 # productivity_mean, productivity_lower_q, productivity_upper_q, model=string defining model name
 def plot_bagging(df,model):
     # get days only
-    days_only = df.loc[df['par_mean']>0]
+    days_only = df.loc[df['par']>0]
     # calculate error metrics
     pred=days_only.productivity_mean[:-1]
-    actual=days_only.NPP_mean[:-1]
+    actual=days_only.NPP[:-1]
     # get rmse
     rmse, smpae, mase=error_metrics(pred, actual)
     
     # make plot with bagged results
     fig,axs=plt.subplots(figsize=(10,8), nrows=2)
     # plot original and bagged results
-    axs[0].plot(df.NPP_mean, label='Original NPP', marker='.')
+    axs[0].plot(df.NPP, label='Original NPP', marker='.')
     axs[0].plot(df.productivity_mean, label='Bagged NPP', marker='.')
     # plot 95% confidence range
-    axs[0].fill_between(df.index, df.productivity_lower_q, 
-                     df.productivity_upper_q, color = 'green', alpha=0.5, label='95% CI')
+    axs[0].fill_between(df.index, df.productivity_ci95_lo, 
+                     df.productivity_ci95_hi, color = 'green', alpha=0.5, label='95% CI')
     # plot day and night
     twinax=axs[0].twinx()
-    plot_night_day(twinax, df.reset_index().rename(columns={'par_mean':'par'}), 
-                                                   ylims=(0.04, 0.075))
+    plot_night_day(twinax, df.reset_index(), ylims=(0.04, 0.075))
     axs[0].set_xlabel('Time (Hours)')
     axs[0].set_ylabel('Hourly C-Fixation (pg C/cell)')
     axs[0].legend()
     axs[0].set_title(f'100x Bootstrapped {model} Decomposition')
 
     # plot comparison of day productivity values
-    axs[1].plot(days_only['NPP_mean'],days_only['productivity_mean'],marker='.',linestyle='',label='Comparison')
-    axs[1].plot(days_only['NPP_mean'],days_only['NPP_mean'],label='1:1 line',c='r',marker='')
+    axs[1].plot(days_only['NPP'],days_only['productivity_mean'],marker='.',linestyle='',label='Comparison')
+    axs[1].plot(days_only['NPP'],days_only['NPP'],label='1:1 line',c='r',marker='')
     # make axis labels
     axs[1].set_xlabel('Measured NPP')
     axs[1].set_ylabel('TSD Bagged NPP')
@@ -559,13 +690,62 @@ def gaussian_noise(x,mu,std):
     x_noisy = x + noise
     return x_noisy 
 
-## function to run entire imputation, TSD model, bootstrapping, and bagging workflow
+
+## helper function to find residuals signicantly different from a mean=1
+# ipnuts: mbb_data=list of dataframes returned from run_bootstrapping()
+from scipy import stats
+def find_bad_resids(mbb_data):
+    mbb_df = pd.concat(mbb_data)
+    # store signficantly different residuals
+    resid_hours=[]
+    # perform 1 sample t-test to check if residual is significantly different from 0, use 99% accuracy
+    threshold=0.01
+    for hour in pd.unique(mbb_df.hour):
+        sub_resid=mbb_df.loc[mbb_df['hour']==hour, 'resid']
+        # run test
+        # null hypothesis: mean residual is the same as the population mean (1)
+        # reject null hypothesis if p-value < threshold
+        stat,p=stats.ttest_1samp(sub_resid.values, popmean=1)
+#         print(f'Hour: {hour}, p-value: {np.round(p,4)}')
+        # check null hypothesis
+        if p < threshold:
+            # save the hour
+            resid_hours.append(hour)
+    # return hours with bad residuals
+    return(resid_hours)
+
+
+## helper function to calculate percentage of significantly different residuals
+# inputs: resid_hours=list of hours returned from find_bad_resids(), bagged=dataframe returned from bagging_results()
+def bad_resid_percent(resid_hours, bagged):
+    # return length of resid hours / length of bagged *100
+    return (len(resid_hours)/len(bagged))*100
+
+## helper function to add a trend to data
+# inputs: df=dataframe to add trend to, trend = list containing trend values
+def add_trend(df, trend):
+    df=df.copy()
+    # set experiment days
+    df['experiment_day']=df['hour'] // 24
+    days = int(len(df)/12)
+    
+    # multiply by trend -- this results in changing amplitude
+    # in this dataset, 12 rows represent 24H
+    # multiply trend by each day in row
+    for day, new_trend in zip(range(0,days), trend):
+        # subset by day and multiply diel and resid by new trend
+        sub = df.loc[df['experiment_day']==day]
+        df.loc[sub.index,'new_ts'] = new_trend * sub.Qc_hour
+    return df
+
+## function to run experiments with trend/noise/missing data, TSD model, bootstrapping, and bagging workflow
+# returns error metrics 
 # inputs: df=dataframe with dataset to generate simulations from, days=int with # days to simulate data for, 
 # model=string to choose model (options are 'baseline', 'STL'),
 # remove=float for proportion of data to remove, runs=int with times to run bootstrapping,
 # noise = float for proportion of noise to add
 def run_full_model(df, days, remove, add_trend=False, trend_df=None,
-                   noise=0, blocks=False, block_len=0, model='STL', runs=100, show_plots=True):
+                   noise=0, blocks=False, model='STL', runs=100, show_plots=True):
     # check if running model with trend
     if add_trend:
         # use inputted data for model
@@ -596,7 +776,8 @@ def run_full_model(df, days, remove, add_trend=False, trend_df=None,
         # generate blocks of missing datam
         if blocks:
             # remove block length and amount of data to remove
-            missing=generate_missing_chunks(sim_df, block_len, remove, 'with_noise')
+            #missing=generate_missing_chunks(sim_df, block_len, remove, 'with_noise')
+            missing=generate_random_chunks(sim_df,'with_noise',remove)
         else:
             # generate misisng data at random
             missing=generate_missing_data(sim_df, 'with_noise', remove)
@@ -611,6 +792,9 @@ def run_full_model(df, days, remove, add_trend=False, trend_df=None,
         impute_df=sim_df.copy()
         # replace with noise column (doesn't matter if noise was added or not)
         impute_df['with_missing']=impute_df['with_noise']
+        # check if there are missing values, and replace with noise
+        impute_df['with_missing']=np.where(impute_df['with_missing']>0, impute_df['with_missing'], 
+         np.mean(impute_df['with_missing']))
     
     if model.lower().startswith('s'):
         # get tsd components
@@ -628,33 +812,46 @@ def run_full_model(df, days, remove, add_trend=False, trend_df=None,
         # perform bagging on bootstrapped data
         bagged=bagging_results(mbb_data)
         ## return error metrics of day time values
-        days_only = bagged.loc[bagged['par_mean']>0]
-        # calculate error metrics
-        pred=days_only.productivity_mean[:-1]
-        actual=days_only.NPP_mean[:-1]
-        rmse, smape, mase=error_metrics(pred, actual)
+        days_only = bagged.loc[bagged['par']>0]
+       # get error metrics
+        rmse_list,snr_list=loop_error_metrics(mbb_data)
+        # calculate residual analytics
+        resid_hours=find_bad_resids(mbb_data)
+        resid_percent=bad_resid_percent(resid_hours, bagged)
+        # flag bad residuals in bagged data
+        bagged['resid_flag']=0
+        # flag with 1 if bad residual
+        bagged.loc[bagged.index.isin(resid_hours), 'resid_flag']=1
     elif model.lower().startswith('base'):
         ## generate simulated data
         base_growth=exp_growth(impute_df,'with_missing',2).shift(-1)
         # add to data
         baseline=impute_df.copy()
         baseline['hourly_growth']=base_growth
+        # # set all negative growth to 0
+        # baseline.loc[baseline['hourly_growth']<0, 'hourly_growth']=0
         # calculate productivity
         rates_df=calc_productivity(baseline, 'hourly_growth','Qc_hour')
         # calculate error metrics of day time values
         days_only = rates_df.loc[rates_df['par']>0]
         # set hour to index
         days_only = days_only.set_index('hour')
-        # calculate error metrics
+        # get rid of nans or infinities
+        days_only=days_only.replace()
+        # calculate error metrics (RMSE only)
         pred=days_only.productivity[:-1]
         actual=days_only.NPP[:-1]
-        rmse, smape, mase=error_metrics(pred, actual)
+        # list is just one value because not bootstrapped
+        rmse_list = [mean_squared_error(actual, pred, squared=False)]
         # rename rates_df to return properly
         bagged=rates_df
+        # no residuals bc no decomposition in baseline model
+        snr_list=[np.nan]
+        resid_percent=np.nan
     elif model.lower().startswith('roll'):
         # get components from rolling model
         pro_seasonal, pro_trend, pro_resid = rolling_tsd(impute_df.set_index('hour'), 'with_missing', period=12,
-                                                        window=3, type='multiplicative', extrapolate=True)
+                                                        window=3, type='log additive', extrapolate=True)
         pro_all=summarize_rolling(pro_seasonal, pro_trend, pro_resid)
         pro_all.rename(columns={'seasonal':'diel'}, inplace=True)
         # get other necessary columns`a
@@ -663,15 +860,18 @@ def run_full_model(df, days, remove, add_trend=False, trend_df=None,
         pro_all['hourly_growth']=exp_growth(pro_all, 'diel',2).shift(-1)
         rates_df=calc_productivity(pro_all, 'hourly_growth', 'Qc_hour')
         # bootstrap model
-        rolling_mbb_df, rolling_mbb_data=run_bootstrapping(rates_df)
+        rolling_mbb_df, mbb_data=run_bootstrapping(rates_df, model='rolling')
         # perform bagging on bootstrapped data
-        roll_bagged=bagging_results(rolling_mbb_data)
+        bagged=bagging_results(mbb_data)
         # get error metrics
-        days_only = roll_bagged.loc[roll_bagged['par_mean']>0]
-        # calculate error metrics
-        pred=days_only.productivity_mean[:-1]
-        actual=days_only.NPP_mean[:-1]
-        rmse, smape, mase=error_metrics(pred, actual)
+        rmse_list,snr_list=loop_error_metrics(mbb_data)
+        # calculate residual analytics
+        resid_hours=find_bad_resids(mbb_data)
+        resid_percent=bad_resid_percent(resid_hours, bagged)
+        # flag bad residuals in bagged data
+        bagged['resid_flag']=0
+        # flag with 1 if bad residual
+        bagged.loc[bagged.index.isin(resid_hours), 'resid_flag']=1
     elif model.lower().startswith('n'):
         # get tsd components
         tsd_df=run_naive(impute_df, 'with_missing')
@@ -682,17 +882,20 @@ def run_full_model(df, days, remove, add_trend=False, trend_df=None,
         rates_df=calc_productivity(tsd_df,'hourly_growth','Qc_hour')
         
         # run bootstrapping to get list of new dataframes
-        mbb_df, mbb_data=run_bootstrapping(rates_df, runs=runs)
+        mbb_df, mbb_data=run_bootstrapping(rates_df, model='naive')
 
         # perform bagging on bootstrapped data
         bagged=bagging_results(mbb_data)
-        ## return error metrics of day time values
-        days_only = bagged.loc[bagged['par_mean']>0]
-        # calculate error metrics
-        pred=days_only.productivity_mean[:-1]
-        actual=days_only.NPP_mean[:-1]
-        rmse, smape, mase=error_metrics(pred, actual)
+        # get error metrics
+        rmse_list,snr_list=loop_error_metrics(mbb_data)
+        # calculate residual analytics
+        resid_hours=find_bad_resids(mbb_data)
+        resid_percent=bad_resid_percent(resid_hours, bagged)
+        # flag bad residuals in bagged data
+        bagged['resid_flag']=0
+        # flag with 1 if bad residual
+        bagged.loc[bagged.index.isin(resid_hours), 'resid_flag']=1
 
     else: 
         return('Choose a valid model: baseline, naive, rolling, or STL')
-    return(bagged, rmse, smape, mase)
+    return(bagged, rmse_list, snr_list)
