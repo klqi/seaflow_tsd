@@ -101,5 +101,108 @@ def calc_daily_hourly_growth(cruise):
     return days_growth, cruise_hourly_avg
 
 
-    ### helper functions used in Zinser simulations experiment
+## helper function to calculate p-value for linear regression
+def calc_pvalue(X,y,params,pred):
+    new_X = np.append(np.ones((len(X),1)), X, axis=1)
+    # calculate mean squared error
+    MSE = (sum((y-pred)**2))/(len(new_X)-len(new_X[0]))
+    # matrix algebra to get p-value
+    v_b = MSE*(np.linalg.inv(np.dot(new_X.T,new_X)).diagonal())
+    s_b = np.sqrt(v_b)
+    t_b = params/ s_b
+    p_val =[2*(1-stats.t.cdf(np.abs(i),(len(new_X)-len(new_X[0])))) for i in t_b]
+    # return raw p-value
+    return(p_val[1])
+
+## helper function to calculate se for linear regression
+def calc_se(X,y,params,pred):
+    ### calculate SE
+    # calculate residuals
+    residuals = y - pred
+    # calculate residuals some of squares
+    residual_sum_of_squares = residuals.T @ residuals
+
+    # get length of data and number of terms
+    N = len(X)
+    p = np.shape(X)[1] + 1
+    sigma_squared_hat = residual_sum_of_squares / (N - p)
+
+    # calculate standard error from data
+    X_with_intercept = np.empty(shape=(N, p), dtype=np.float)
+    X_with_intercept[:, 0] = 1
+    X_with_intercept[:, 1:p] = X
+
+    var_beta_hat = np.linalg.inv(X_with_intercept.T @ X_with_intercept) * sigma_squared_hat
+    se_list=[]
+    for p_ in range(p):
+        standard_error = var_beta_hat[p_, p_] ** 0.5
+        se_list.append(standard_error)
+    # return SE by X (0 is constant)
+    return se_list[1]
+
+### helper function to calculate daily average growth
+from sklearn.linear_model import LinearRegression
+from scipy import stats
+def calc_daily_avg_growth(df, col):
+    # get data to fit
+    X = np.arange(0, len(df)).reshape(-1, 1)
+    y = np.log(df[col].values)
+
+    # add y intercent, log Qc at sunrise
+    y_int=np.log(df.loc[df['time_of_day']=='sunrise', col]).values[0]
+    # Step 1: Subtract the known y-intercept from all y values
+    y_centered = y - y_int
+    # Step 2: Fit the linear regression model
+    model = LinearRegression(fit_intercept=False)
+    model.fit(X, y_centered)
+    # Step 3: Add the known y-intercept back to the model's intercept
+    model.intercept_ += y_int
+    # step 4: get new y values
+    pred=model.predict(X)
+    # get slope
+    slope=model.coef_[0]
+    params = np.append(model.intercept_,model.coef_)
+
+    # calculate p-value
+    pval=calc_pvalue(X,y,params,pred)
+    # calculate p-value
+    se=calc_se(X,y,params,pred)
+    return(slope, pval, se)
     
+import ruptures as rpt
+import matplotlib.pyplot as plt
+### helper functions for change point detection
+# first detect by using raw data- use PELT (unknown # breakpoints)
+def pelt_bkps(trend,make_graph=False):
+    # calculate penalty by BIC
+    T, d = trend.shape  # number of samples, dimension
+    sigma = np.std(trend)  # noise standard deviation
+    bic = (2*sigma**2)*np.log(T)*(d+1)
+
+    algo = rpt.Pelt(model="l2", min_size=24)
+    algo.fit(trend)
+    result = algo.predict(pen=bic)
+    return(result)
+
+## helper function to create breakpoints in dataframe
+def make_bkps(bkps):
+    bkps=bkps.copy()
+    # init vars
+    index=0
+    # first add 0 to the beginning of bkps if not already there
+    if (bkps[index]!=0):
+        bkps.insert(0,0)
+    # generate change points list
+    segments=[]
+    for pt in bkps:
+        ## if at the end, end loop
+        if pt==bkps[-1]:
+            break
+        # impossible to start at beginning as min_size = 24, no need for that edge case (famous last words lol)
+        else:
+            # make second segment
+            num_bkps=bkps[index+1]-pt
+            seg=np.repeat(index, num_bkps)
+            segments.append(seg)
+            index+=1
+    return np.concatenate(segments).ravel().tolist()

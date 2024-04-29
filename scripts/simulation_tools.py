@@ -234,7 +234,8 @@ def generate_random_chunks(df,col,p,missing_col='with_missing'):
 ## helper function to run imputation function and fill in data
 # input: missing_df=dataframe with 'with_missing' column with data removed
 # returns: final_impute=dataframe with imputed data in 'with_missing'
-def run_imputation(missing_df,col,missing_col='with_missing', period=12, interval=2):
+def run_imputation(missing_df,col,missing_col='with_missing', data_type='simulation',
+                   period=12, interval=2):
     # create subsetted df excluding nan values 
     missing_cont=missing_df.loc[missing_df[missing_col].notna()]
 
@@ -249,32 +250,52 @@ def run_imputation(missing_df,col,missing_col='with_missing', period=12, interva
     missing_cont.loc[train.index, 'trend']=decompose.trend
     missing_cont.loc[train.index, 'seasonal']=decompose.seasonal
 
-    # set index as time for interpolation
-    missing_cont.set_index('hour',inplace=True)
-    # grab first and last hours of complete dataframe
-    hour_range=missing_df.iloc[[0,-1]]['hour'].values
-    # create resamppled list 
-    resampled=np.arange(hour_range[0],hour_range[1]+1, interval)
-    # resample interpolated list
-    missing_resamp = missing_cont.reindex(missing_cont.index.union(
-        resampled)).interpolate('values',limit_direction='both').loc[resampled]
-    # add missing diam_med data back to interpolated data
-    missing_resamp[missing_col]=missing_cont[missing_col]
-
-    # add flag to check if filled
-    missing_resamp['filled']=0
-    # iteratively impute
-    pre_impute =iteratively_impute(missing_resamp, missing_col)
-    # fill additional gaps with linear interpolation
-    final_impute = pre_impute.reindex(pre_impute.index.union(
-        resampled)).interpolate(limit_direction='both',axis=0).loc[resampled].reset_index()
-    # replace altered with its original values
-    if col.startswith('data'):
-        final_impute[col]=missing_df[col]
+    # check what kind of data to set up for interpolation
+    if data_type=='simulation':
+        # set index as time for interpolation for experimental/simulation data
+        missing_cont.set_index('hour',inplace=True)
+        # grab first and last hours of complete dataframe
+        hour_range=missing_df.iloc[[0,-1]]['hour'].values
+        # create resamppled list 
+        resampled=np.arange(hour_range[0],hour_range[1]+1, interval)
+        # resample interpolated list
+        missing_resamp = missing_cont.reindex(missing_cont.index.union(
+            resampled)).interpolate('values',limit_direction='both').loc[resampled]
+        # add missing diam_med data back to interpolated data
+        missing_resamp[missing_col]=missing_cont[missing_col]
+            # add flag to check if filled
+        missing_resamp['filled']=0
+        # iteratively impute
+        pre_impute =iteratively_impute(missing_resamp, missing_col)
+        # fill additional gaps with linear interpolation
+        final_impute = pre_impute.reindex(pre_impute.index.union(
+            resampled)).interpolate(limit_direction='both',axis=0).loc[resampled].reset_index()
+        # replace altered with its original values
+        if col.startswith('data'):
+            final_impute[col]=missing_df[col].values
+        else:
+            final_impute['Qc_hour']=missing_df['Qc_hour']
+            final_impute['NPP']=missing_df['NPP']
+            final_impute['par']=missing_df['par']
     else:
-        final_impute['Qc_hour']=missing_df['Qc_hour']
-        final_impute['NPP']=missing_df['NPP']
-        final_impute['par']=missing_df['par']
+        # set index as time for interpolation for field data
+        missing_resamp=missing_cont.reset_index(drop=True).copy()
+        missing_cont.set_index('time',inplace=True)
+        # resample and get only fill missing_col values
+        missing_resamp=missing_cont.resample('1H').agg(pd.Series.sum, 
+                                                  min_count=1).reset_index()
+        
+        # add flag to check if filled
+        missing_resamp['filled']=0
+        # iteratively impute
+        pre_impute=iteratively_impute(missing_resamp, missing_col).set_index('time')
+        # fill additional gaps with linear interpolation
+        final_impute = pre_impute.resample('1H').mean().interpolate(method='linear').reset_index()
+        # add cruise and population data back, and original data with missing values
+        final_impute['cruise']=pd.unique(missing_cont['cruise'])[0]
+        final_impute['pop']=pd.unique(missing_cont['pop'])[0]
+        final_impute[col]=missing_resamp[col]
+
     return(final_impute)
 
 ## helper function to plot imputed data
@@ -402,8 +423,26 @@ def calc_productivity(df, growth_col, qc_col):
         df['productivity']=df[growth_col]*prod_conv
     # if one or both rejects null, calculate breakpoints
     else:
-        # need to update this later
-        print('Calculating break points ...')
+        print('Calculating break points ... not really')
+        prod_conv=np.mean(df[qc_col])
+        df['productivity']=df[growth_col]*prod_conv
+        # # use pelt to get break points
+        # bkps=pelt_bkps(df['trend'])
+        # # set break points as new column in df
+        # df['bkps']=make_bkps(bkps)
+        # # find mean trend per change point
+        # mean_bkps=df.groupby(['pop','bkps']).agg({
+        #     'trend':'mean'}).reset_index()
+        # # rename col
+        # mean_bkps.rename(columns={'trend':'mean_bkp'},inplace=True)
+        # # merge with data that has growth
+        # # merge with df with growth col
+        # prod_df=df.merge(mean_bkps)
+        # # calculate productivity 
+        # prod_df['productivity']=prod_df[growth_col]*prod_df['mean_bkp']
+        # # reset df name
+        # df=prod_df
+
     return(df)
 
 ## helper function to plot productivity results, also shows only for day time values

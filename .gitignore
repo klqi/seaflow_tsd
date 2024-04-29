@@ -3,3 +3,6 @@
 data/*
 __pycache__
 figures/*
+ground_truth_testing.ipynb
+environmental_analysis.ipynb
+simulation_data/*

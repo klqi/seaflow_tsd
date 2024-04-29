@@ -149,12 +149,16 @@ def is_time_between(begin_time, end_time, check_time):
 # helper function to calculate day/night cycle using astral
 # requires lat (float), lon (float), and time (datetime) columns as input
 # returns dataframe with added columns, night (day, night, sunrise, sunset) and time_day (offset for calculation)
-def find_night(df):
+def find_night(df, offset=True):
     # drop annoying columns
     if 'index' in df:
         df.drop(columns=['index'], inplace=True)
-    # offset by 1 day
-    df['time_day'] = df['time'].dt.round('1d') - pd.DateOffset(1)
+    # offset by 1 day if true
+    if offset:
+        df['time_day'] = df['time'].dt.round('1d') - pd.DateOffset(1)
+    else:
+        df['time_day'] = df['time'].dt.round('1d')
+    # initialize night col
     df['night'] = 'nan'
 
     # loooooop thru whee! (using sunrise/sunset is better than dawn/dusk- why?)
@@ -165,10 +169,10 @@ def find_night(df):
         ss = sunset(obs, date = row['time_day'])
         # round to nearest hour
         night_time = [hour_rounder(pd.to_datetime(x)) for x in (sr, ss)]
-        # say if time is at sunset
+        # say if time is at sunrise
         if row['time'] == night_time[0]:
             df.loc[index, 'night'] = 'sunrise'
-        # sunrise check
+        # sunset check
         elif row['time'] == night_time[1]:
             df.loc[index, 'night'] = 'sunset'
         # day check
