@@ -114,7 +114,7 @@ def iteratively_impute(sub_df, col):
             elif (back_ind<0):
                 diam_smooth=sub_df.loc[fwd_ind, col]
                 trend_factor=sub_df.loc[fwd_ind,'trend']
-            # if 24 hours after doesn't exist or is missing, only only use fwd
+            # if 24 hours after doesn't exist or is missing, only only use backward
             elif fwd_ind>=len(sub_df):
                 diam_smooth=sub_df.loc[back_ind, col]
                 trend_factor=sub_df.loc[back_ind,'trend']
@@ -271,7 +271,7 @@ def summarize_rolling(seasonal, trend, resid):
 ## running entire model w/ bootstrapping (no simulation) (VERSION 1!!)
 # needs to be run on 1 dataset at a time (ie: 1 population for 1 cruise)
 ## runs both STL and rolling model, but chooses the results from the model with a lower SE
-from diel_tools_clean import calc_daylength
+from diel_tools_clean import calc_daylength, find_night
 from rate_functions import exp_growth, get_daily_growths
 def run_full_model(df,col,missing_col,pop):
     ###### set up data for model ######
@@ -290,15 +290,19 @@ def run_full_model(df,col,missing_col,pop):
         return None,None, None, None
     # set consecutive hours for df throughout length of cruise
     impute_df['hour']=np.arange(0,len(impute_df))
-    ## find night and day, and cruise days -NEW METHOD
-    # create observer col
-    impute_df['obs']=impute_df.apply(lambda x: Observer(x.lat, x.lon, 0), axis=1)
-    # create hourly rounded sunrise/sunset cols for bb 
-    res=impute_df.apply(lambda x: sunrise_sunset(x.time, x.obs), axis=1)
-    impute_df[['sunrise', 'sunset']]=pd.DataFrame(res.tolist(), index=impute_df.index)
-    # label by using night/day col
-    impute_df['night']=impute_df.apply(lambda x: label_daytime(x.time, x.sunrise, x.sunset), axis=1)
-    impute_df_days=days_by_sunrise(impute_df).drop(columns=['index'])
+    ## first fix longitudes
+    if not (np.min(impute_df['lon'])<180)&(np.max(impute_df['lon']>180)):
+        ## otherwise the solar calc will break! and i don't know why!!!!
+        impute_df['lon']=np.where(impute_df['lon']<180, impute_df['lon'], impute_df['lon']-360)
+    ## find night and day, and cruise days -BACK TO OLD METHOD- the new way with sunrise_sunset() doesn't work.
+    df_times=find_night(impute_df.copy())
+    ############## edge case temp fix ##############
+    if len(pd.unique(df_times['night']))<=1:
+        # undo date offset for find_night and rerun
+        df_times=find_night(df_times, offset=False)
+    ################################################
+    # calculate cruise day by using sunrise and sunset
+    impute_df_days=days_by_sunrise(df_times).drop(columns=['index','time_day'])
     impute_df_days.rename(columns={'night':'time_of_day'},inplace=True)
 
     # save sunrise df subset
@@ -318,8 +322,8 @@ def run_full_model(df,col,missing_col,pop):
     # calculate biomass 
     impute_df_days['biomass']=impute_df_days['Qc_hour']*impute_df_days['abundance']
     # temporarily save
-    if pop == 'prochloro':
-        impute_df_days.to_pickle('data/indian_ocean/imputed_df_v1_all.pickle')
+    # if pop == 'prochloro':
+    #     impute_df_days.to_pickle('data/indian_ocean/imputed_df_v1_all.pickle')
 
     # calculate cruise length which model to run
     cruise_len=len(impute_df_days)//24

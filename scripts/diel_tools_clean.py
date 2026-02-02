@@ -88,3 +88,61 @@ def calc_daylength(df):
         # save in df df
         df.loc[df['cruise_day']==row['cruise_day'], 'daylength']=diff
     return df
+
+
+# cursed helper function to calculate day/night cycle using astral
+# requires lat (float), lon (float), and time (datetime) columns as input
+# returns dataframe with added columns, night (day, night, sunrise, sunset) and time_day (offset for calculation)
+def find_night(df, offset=True):
+    # drop annoying columns
+    if 'index' in df:
+        df.drop(columns=['index'], inplace=True)
+    # offset by 1 day if true
+    if offset:
+        df['time_day'] = df['time'].dt.round('1d') - pd.DateOffset(1)
+    else:
+        df['time_day'] = df['time'].dt.round('1d')
+    # initialize night col
+    df['night'] = 'nan'
+
+    # loooooop (using sunrise/sunset works but dawn/dusk doesnt- why?) IDK
+    for index, row in df.iterrows():
+        # is it night time?
+        obs = Observer(row['lat'], row['lon'], 0)
+        sr = sunrise(obs, date = row['time_day'])
+        ss = sunset(obs, date = row['time_day'])
+        # round to nearest hour
+        night_time = [hour_rounder(pd.to_datetime(x)) for x in (sr, ss)]
+        # say if time is at sunrise
+        if row['time'] == night_time[0]:
+            df.loc[index, 'night'] = 'sunrise'
+        # sunset check
+        elif row['time'] == night_time[1]:
+            df.loc[index, 'night'] = 'sunset'
+        # day check
+        elif is_time_between(night_time[0], night_time[1], row['time']):
+            # catch edge case where astral fails to find sunrise
+            if (0 < index < len(df)):
+                # change to sunrise if the row directly before is night
+                if (df.loc[index-1, 'night']=='night'):
+                    df.loc[index-1, 'night']='sunrise'
+                    df.loc[index,'night']='day'
+                else:
+                    df.loc[index, 'night'] = 'day'
+            else:
+                df.loc[index, 'night'] = 'day'
+        # night check
+        else:
+            # catch edge case where astral fails to find sunset
+            if (0 < index < len(df)):
+                # must be run after index check or will fail
+                if (df.loc[index-1, 'night']=='day'):
+                    # change previous row to sunrise if before is day
+                    df.loc[index-1, 'night']='sunset'
+                    # change present row
+                    df.loc[index, 'night']='night'
+                else:
+                    df.loc[index, 'night'] = 'night'
+            else:
+                df.loc[index, 'night'] = 'night'
+    return(df)
