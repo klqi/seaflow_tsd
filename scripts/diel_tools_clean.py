@@ -146,3 +146,55 @@ def find_night(df, offset=True):
             else:
                 df.loc[index, 'night'] = 'night'
     return(df)
+
+
+# helper function to mark each day by sunset/sunrise instead of by utc time
+## input: df=dataframe with day/night/sunrise/sunset labels (run through find_night function)
+## output: resulting df with cruise_day column
+# get list of indices for sunrises
+def days_by_sunrise(diel):
+    # create copy of diel dataframe
+    diel_df=diel.reset_index().copy()
+    dd=diel_df.loc[diel_df['night']=='sunrise']
+    # only get sunrise indices
+    sunrise_inds=dd.index.tolist()
+    # set a check for incomplete days (add a 0)
+    if sunrise_inds[0]!=0:
+        sunrise_inds.insert(0,0)
+    # keep track of days
+    count=0
+    # loop through each index on sunrise days
+    for i in sunrise_inds:
+        ## cruise day 0 for first day
+        if (count==0):
+            # check if cruise starts at sunrise (complete first day)
+            if (i==0):
+                # set inds to be from index 0-1 of sunrise_inds
+                inds=np.arange(i, sunrise_inds[count+1])
+            # first day not complete
+            else:
+                # set inds to be from index 0 to next sunrise
+                inds=np.arange(0,sunrise_inds[count])
+        ## check if we're on the last sunrise index
+        elif (i == sunrise_inds[-1]):
+            # set inds to be from last sunrise to the end of the cruise
+            inds=np.arange(i, len(diel_df))
+        else:
+            inds=np.arange(i, sunrise_inds[count+1])
+        # set indices
+        diel_df.loc[inds, 'cruise_day']=count
+        # increase count 
+        count+=1
+    return(diel_df)
+
+def get_complete_days(data,exclude_night=True):
+    # only grab complete days
+    day_counts=data.groupby(['cruise_day','pop']).agg({'time_day':'count'}).reset_index()
+    complete_days=pd.unique(day_counts.loc[day_counts['time_day'].between(23,25),'cruise_day'])
+    # exclude incopmlete days and night if true
+    if (exclude_night):
+        days=data.loc[data['cruise_day'].isin(complete_days)&(data['night']!='night')]
+    else:
+        # only exclude incomplete days
+        days=data.loc[data['cruise_day'].isin(complete_days)]
+    return(days)

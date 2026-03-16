@@ -3,9 +3,32 @@
 
 import pandas as pd
 import numpy as np
-from tsd_functions import summarize_by_pop_time, interp_by_time
-from diel_tools import days_by_sunrise, find_night
+from diel_tools_clean import days_by_sunrise, find_night
 from statsmodels.tsa.seasonal import STL
+
+
+# helper function to interpolate data based on time
+# inputs: df = pd.DataFrame, pop = string for column in df, method = interpolation type (default linear)
+def interp_by_time(df, pop, method='linear', order=1):
+    interp_test = df
+    # drop null location values
+    interp_test = interp_test[interp_test['lat'].notnull()]
+    # reset data type
+    interp_test['time'] = pd.to_datetime(interp_test['time'])
+    # set the index as time
+    interp_test = interp_test.set_index('time')
+    interp_test.index = pd.to_datetime(interp_test.index)
+    # interpolate by population 
+    sub = interp_test[interp_test['pop']==pop]
+    # resample by every hour to fill missing with NAs and run interpolation
+    if method=='linear':
+        sub_res = sub.resample('1H').mean().interpolate(method=method)
+    else:
+        sub_res = sub.resample('1H').mean().interpolate(method=method, order=order)
+    sub_res['pop'] = pop
+    # return fully interpolated dataframe
+    return(sub_res)
+    
 
 ### helper function to run TSD model (STL only for now) to get cleaned dataframe for estimating growth/productivity
 ## input: df=cruise dataframe
@@ -128,7 +151,7 @@ def calc_se(X,y,params,pred):
     sigma_squared_hat = residual_sum_of_squares / (N - p)
 
     # calculate standard error from data
-    X_with_intercept = np.empty(shape=(N, p), dtype=np.float)
+    X_with_intercept = np.empty(shape=(N, p), dtype=float)
     X_with_intercept[:, 0] = 1
     X_with_intercept[:, 1:p] = X
 
