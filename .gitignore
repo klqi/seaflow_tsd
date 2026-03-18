@@ -1,3 +1,5 @@
 __pycache__/
 .DS_Store
 .env
+noise_simulation_results_all.pickle
+remove_simulation_results_all.pickle
