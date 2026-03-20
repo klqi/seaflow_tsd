@@ -16,7 +16,7 @@ Python 3.8, Anaconda
 Clone this repository into your current working directory:
 
 ``` 
-git clone git@github.com:klqi/seaflow_tsd.git
+git clone https://github.com/klqi/seaflow_tsd.git
 ```
 
 Create a conda environment from this repository:
@@ -30,3 +30,10 @@ Or, use an existing, activated conda environment:
 ```
 conda env update -f environment.yml
 ```
+
+Activate your environment:
+```
+conda activate seaflow
+```
+
+Run any of the project notebooks to get started!
