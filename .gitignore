@@ -3,3 +3,6 @@ __pycache__/
 .env
 noise_simulation_results_all.pickle
 remove_simulation_results_all.pickle
+*_15min.pickle
+*_30min.pickle
+*_3min.pickle

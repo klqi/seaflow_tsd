@@ -11,10 +11,15 @@ import pandas as pd
 ## helper function to round to nearest hour
 # input: t = datetime object
 # output: datetime object rounded to nearest hour
-def hour_rounder(t):
+def hour_rounder(t, timeres):
     # returns datetime rounded to nearest hour by adding a timedelta hour if minute >= 30
-    return (t.replace(second=0, microsecond=0, minute=0, hour=t.hour)
-               +timedelta(hours=t.minute//30))
+    if timeres == '1H':
+        rounded = t.replace(second=0, microsecond=0, minute=0, hour=t.hour) \
+            + timedelta(hours=t.minute//30)
+    else:
+        rounded = t.replace(second=0, microsecond=0, minute=0) \
+           + timedelta(minutes=30 * ((t.minute + 15) // 30))
+    return rounded
 
 ## helper function to check whether a datetime is between two other dateteims
 # input: begin_time = datetime object at start, end_time = datetime object at end, check_time = datetime object to check
@@ -30,19 +35,19 @@ def is_time_between(begin_time, end_time, check_time):
 ## helper function to calculate sunrise and sunset times
 # input: time = datetime object, obs = observer object (astral)
 # output: sr = datetime of sunrise, ss = datetime of sunset
-def sunrise_sunset(time, obs):
+def sunrise_sunset(time, obs, timeres):
     # fist calculate sunrise no offset
-    sr=hour_rounder(sunrise(obs, date=time))
+    sr=hour_rounder(sunrise(obs, date=time), timeres)
     # next calculate sunrise with offset
-    sr_offset=hour_rounder(sunrise(obs, date=time+pd.DateOffset(1)))
+    sr_offset=hour_rounder(sunrise(obs, date=time+pd.DateOffset(1)), timeres)
     # if sunrise with offset is before measured time, then calculate sunrise/set with offset
     if (sr_offset <= time):
         # needs offset
-        ss=hour_rounder(sunset(obs, date=time+pd.DateOffset(1)))
+        ss=hour_rounder(sunset(obs, date=time+pd.DateOffset(1)), timeres)
         return sr_offset,ss
     else:
         # no offset
-        ss=hour_rounder(sunset(obs, date=time))
+        ss=hour_rounder(sunset(obs, date=time), timeres)
         return sr,ss
     
 ## helper function to determine what time of day it is given sunrise/sunset times
@@ -93,7 +98,7 @@ def calc_daylength(df):
 # cursed helper function to calculate day/night cycle using astral
 # requires lat (float), lon (float), and time (datetime) columns as input
 # returns dataframe with added columns, night (day, night, sunrise, sunset) and time_day (offset for calculation)
-def find_night(df, offset=True):
+def find_night(df, timeres, offset=True):
     # drop annoying columns
     if 'index' in df:
         df.drop(columns=['index'], inplace=True)
@@ -112,7 +117,7 @@ def find_night(df, offset=True):
         sr = sunrise(obs, date = row['time_day'])
         ss = sunset(obs, date = row['time_day'])
         # round to nearest hour
-        night_time = [hour_rounder(pd.to_datetime(x)) for x in (sr, ss)]
+        night_time = [hour_rounder(pd.to_datetime(x), timeres) for x in (sr, ss)]
         # say if time is at sunrise
         if row['time'] == night_time[0]:
             df.loc[index, 'night'] = 'sunrise'

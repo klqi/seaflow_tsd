@@ -33,14 +33,14 @@ def interp_by_time(df, pop, method='linear', order=1):
 ### helper function to run TSD model (STL only for now) to get cleaned dataframe for estimating growth/productivity
 ## input: df=cruise dataframe
 ## output: days_only=dataframe with saved diel components for only day time values, days_growth = hourly data per day
-def get_tsd_outputs(df):
+def get_tsd_outputs(df, timeres):
     # interpolate for pro and syn separately
     raw_cruise = df[df['lat'].notnull()].reset_index()
     # run linear interpolation helper function to fill in missing data
     pro_res = interp_by_time(raw_cruise, 'prochloro')
     syn_res = interp_by_time(raw_cruise, 'synecho')
     # run diel cycle on 
-    diel=find_night(pro_res.reset_index())
+    diel=find_night(pro_res.reset_index(), timeres)
     # get days by sunrise
     sr_days = days_by_sunrise(diel).drop(columns=['pop','diam_med','n_per_uL','c_per_uL'])
     # merge with output of sunrise days to get cruise days defined by sunrise
@@ -78,10 +78,10 @@ def exp_growth(df,col,spacing):
 ## function to calculate daily average hourly growth
 # input: df=dataframe with cruise data
 # output: returns df with daily averaged hourly growth + std
-def calc_daily_hourly_growth(cruise):
+def calc_daily_hourly_growth(cruise, timeres):
     # just grab cruise name from last row
     name=cruise.iloc[-1].cruise
-    days_only=get_tsd_outputs(cruise)
+    days_only=get_tsd_outputs(cruise, timeres)
     # calculate average hourly cellular growth for each day after night time has been removed
     hourly_all=[]
     for day in pd.unique(days_only['cruise_day']):
@@ -123,6 +123,69 @@ def calc_daily_hourly_growth(cruise):
     cruise_hourly_avg['cruise']=name
     return days_growth, cruise_hourly_avg
 
+# helper functions to calculate daily growth from Qc
+def get_daily_growths(df, period, col='diel'):
+    # get cruise info
+    cruise=pd.unique(df['cruise'])[0]
+    pop=pd.unique(df['pop'])[0]
+    # clean data and save results
+    day_keys=['day','sunrise']
+    daily_growth=[]
+    pvals=[]
+    daily_se=[]
+    cruise_days=[]
+    keep_days=[]
+    skip_days=[]
+    productivity=[]
+    productivity_se = []
+    is_aloha=[]
+    # calcualte growth rate by day
+    for day in pd.unique(df['cruise_day']):
+        # subset df by day and day time, and remove null values
+        sub_df=df.loc[(df['cruise_day']==day)&
+                          (df['time_of_day'].isin(day_keys))&
+                     df[col].notnull()].reset_index(drop=True)
+        # calculate 6 hours based on period (1/4 of 24 hour)
+        min_len = period / 4
+        # if no sunrise, skip, and if not long enough (at least 6 hours worth of data)
+        if ('sunrise' not in pd.unique(sub_df['time_of_day'])) | (len(sub_df) < min_len):
+            # save the bad day!
+            skip_days.append(day)
+            continue
+        # get day
+        day_of=pd.to_datetime(sub_df['time']).dt.date[0]
+        # calculate daily growth+se
+        growth,pval,se=calc_daily_avg_growth(sub_df,col, period)
+        # calculate productivity
+        prod=sub_df['abundance_dawn'].values[0]*sub_df['qc0'].values[0]*(np.exp(
+            growth*sub_df['daylength'].values[0]) - 1)
+        prod_se =  abs(sub_df['abundance_dawn'].values[0] * 
+                       sub_df['qc0'].values[0] * 
+                       sub_df['daylength'].values[0] * 
+                       np.exp(growth * sub_df['daylength'].values[0])) * se
+        # save data
+        productivity.append(prod)
+        productivity_se.append(prod_se)
+        pvals.append(pval)
+        daily_growth.append(growth)
+        daily_se.append(se)
+        cruise_days.append(day_of)
+        keep_days.append(day)
+        is_aloha.append(np.mean(sub_df['ALOHA']))
+    # save in a df
+    rates_df=pd.DataFrame(columns=['time','cruise','pop','daily_growth','daily_se','pval',
+                                   'productivity','ALOHA'])
+    rates_df['time']=cruise_days
+    rates_df['cruise']=cruise
+    rates_df['daily_growth']=daily_growth
+    rates_df['daily_se']=daily_se
+    rates_df['pop']=pop
+    rates_df['pval']=pvals
+    rates_df['cruise_day']=keep_days
+    rates_df['productivity']=productivity
+    rates_df['productivity_se']=productivity_se
+    rates_df['ALOHA']=is_aloha
+    return rates_df, skip_days
 
 ## helper function to calculate p-value for linear regression
 def calc_pvalue(X,y,params,pred):
@@ -166,7 +229,7 @@ def calc_se(X,y,params,pred):
 ### helper function to calculate daily average growth
 from sklearn.linear_model import LinearRegression
 from scipy import stats
-def calc_daily_avg_growth(df, col):
+def calc_daily_avg_growth(df, col, period):
     # get data to fit
     X = np.arange(0, len(df)).reshape(-1, 1)
     y = np.log(df[col].values)

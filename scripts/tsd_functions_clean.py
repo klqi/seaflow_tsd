@@ -1,14 +1,14 @@
 import pandas as pd
 from astral import Observer
 import sys
-sys.path.insert(0,'/Users/Kathy/Desktop/UW/seaflow/decomposition_project/scripts/')
+sys.path.insert(0,'/Users/Kathy/Library/CloudStorage/OneDrive-UW/Desktop/UW/seaflow/seaflow_tsd_project/scripts/')
 from diel_tools_clean import sunrise_sunset, label_daytime
 
 ## helper function to fill in sunrise/sunset times by using imputed values
-def impute_daytime(df):
+def impute_daytime(df, timeres):
     # let's attempt to test imputing day/night time
     df_time=df.set_index('time')
-    df_resamp=df_time[['lat','lon','ALOHA']].resample('1H').mean().interpolate(method='linear').reset_index()
+    df_resamp=df_time[['lat','lon','ALOHA']].resample(timeres).mean().interpolate(method='linear').reset_index()
     df_interp=pd.merge(df_resamp, df_time.reset_index(), how='left')
     # recalculate sunrise/sunset times from missing values
     df_missing=df_interp.loc[df_interp['Qc_hour'].isnull()]
@@ -143,7 +143,7 @@ def iteratively_impute(sub_df, col):
 # input: missing_df=dataframe with 'with_missing' column with data removed
 # returns: final_impute=dataframe with imputed data in 'with_missing'
 from statsmodels.tsa.seasonal import seasonal_decompose
-def run_imputation(missing_df,col,missing_col='with_missing', data_type='simulation',
+def run_imputation(missing_df,col,missing_col='with_missing', data_type='simulation', timeres = '1H',
                    period=12, interval=2):
     # create subsetted df excluding nan values 
     missing_cont=missing_df.loc[missing_df[missing_col].notna()]
@@ -190,7 +190,7 @@ def run_imputation(missing_df,col,missing_col='with_missing', data_type='simulat
         missing_resamp=missing_cont.reset_index(drop=True).copy()
         missing_cont.set_index('time',inplace=True)
         # resample and get only fill missing_col values
-        missing_resamp=missing_cont.resample('1H').agg(pd.Series.sum, 
+        missing_resamp=missing_cont.resample(timeres).agg(pd.Series.sum, 
                                                   min_count=1)
         
         # add flag to check if filled
@@ -198,7 +198,7 @@ def run_imputation(missing_df,col,missing_col='with_missing', data_type='simulat
         # iteratively impute
         pre_impute=iteratively_impute(missing_resamp, missing_col).set_index('time')
         # fill additional gaps with linear interpolation
-        final_impute = pre_impute.resample('1H').mean().interpolate(method='linear').reset_index()
+        final_impute = pre_impute.resample(timeres).mean().interpolate(method='linear').reset_index()
         # add cruise and population data back, and original data with missing values
         final_impute['cruise']=pd.unique(missing_cont['cruise'])[0]
         final_impute['pop']=pd.unique(missing_cont['pop'])[0]
@@ -270,10 +270,11 @@ def summarize_rolling(seasonal, trend, resid):
 
 ## running entire model w/ bootstrapping (no simulation) (VERSION 1!!)
 # needs to be run on 1 dataset at a time (ie: 1 population for 1 cruise)
+sys.path.insert(0,'/Users/Kathy/Library/CloudStorage/OneDrive-UW/Desktop/UW/seaflow/seaflow_tsd_project/scripts/')
 ## runs both STL and rolling model, but chooses the results from the model with a lower SE
 from diel_tools_clean import calc_daylength, find_night
 from rate_functions import exp_growth, get_daily_growths
-def run_full_model(df,col,missing_col,pop):
+def run_full_model(df,col,missing_col,pop, period, timeres):
     ###### set up data for model ######
     abund_threshold=0.02
     # Criteria 1: filter out those with low abundance
@@ -281,8 +282,8 @@ def run_full_model(df,col,missing_col,pop):
     # split by population
     pop_df=df[df['pop']==pop].reset_index(drop=True).sort_values(by='time')
     # run imputation algorithm and sort by time
-    impute_df=run_imputation(pop_df,col=col,missing_col=missing_col,
-                             data_type='field',period=24,interval=1)
+    impute_df=run_imputation(pop_df,col=col,missing_col=missing_col, timeres = timeres,
+                             data_type='field',period=period,interval=1)
     # check if impute_df returns a value
     if impute_df is None:
         # try to resolve impute df by splitting data into different segments to run in cruise
@@ -292,14 +293,14 @@ def run_full_model(df,col,missing_col,pop):
     impute_df['hour']=np.arange(0,len(impute_df))
     ## first fix longitudes
     if not (np.min(impute_df['lon'])<180)&(np.max(impute_df['lon']>180)):
-        ## otherwise the solar calc will break! and i don't know why!!!!
+        ## otherwise the solar calc will break!
         impute_df['lon']=np.where(impute_df['lon']<180, impute_df['lon'], impute_df['lon']-360)
     ## find night and day, and cruise days -BACK TO OLD METHOD- the new way with sunrise_sunset() doesn't work.
-    df_times=find_night(impute_df.copy())
+    df_times=find_night(impute_df.copy(), timeres)
     ############## edge case temp fix ##############
     if len(pd.unique(df_times['night']))<=1:
         # undo date offset for find_night and rerun
-        df_times=find_night(df_times, offset=False)
+        df_times=find_night(df_times, timeres, offset=False)
     ################################################
     # calculate cruise day by using sunrise and sunset
     impute_df_days=days_by_sunrise(df_times).drop(columns=['index','time_day'])
@@ -321,20 +322,16 @@ def run_full_model(df,col,missing_col,pop):
     impute_df_days=calc_daylength(impute_df_days)
     # calculate biomass 
     impute_df_days['biomass']=impute_df_days['Qc_hour']*impute_df_days['abundance']
-    # temporarily save
-    # if pop == 'prochloro':
-    #     impute_df_days.to_pickle('data/indian_ocean/imputed_df_v1_all.pickle')
-
     # calculate cruise length which model to run
-    cruise_len=len(impute_df_days)//24
+    cruise_len=len(impute_df_days)//period
     
     ## Run both models!!
     ## run STL model and get tsd components
-    stl_tsd=run_STL(impute_df_days, col='data_with_missing',period=24)
+    stl_tsd=run_STL(impute_df_days, col='data_with_missing',period=period)
     stl_tsd['ALOHA']=impute_df_days['ALOHA']
     stl_tsd['biomass']=impute_df_days['biomass']
     # calculate daily averaged hourly growth
-    stl_bagged, skip_days=get_daily_growths(stl_tsd)
+    stl_bagged, skip_days=get_daily_growths(stl_tsd, period)
     # specify model
     stl_tsd['model']='STL'
     stl_bagged['model']='STL'
@@ -358,7 +355,7 @@ def run_full_model(df,col,missing_col,pop):
         return(impute_df_days, tsd_df, bagged, skip_STL)
         
     # get components from rolling model
-    pro_seasonal, pro_trend, pro_resid = rolling_tsd(impute_df_days.set_index('hour'), 'data_with_missing', period=24,
+    pro_seasonal, pro_trend, pro_resid = rolling_tsd(impute_df_days.set_index('hour'), 'data_with_missing', period=period,
                                                     window=3, type='log additive', extrapolate=True)
     pro_all=summarize_rolling(pro_seasonal, pro_trend, pro_resid)
     pro_all.rename(columns={'seasonal':'diel'}, inplace=True)
@@ -370,7 +367,7 @@ def run_full_model(df,col,missing_col,pop):
     rolling_tsd_df['ALOHA']=impute_df_days['ALOHA']
     rolling_tsd_df['biomass']=impute_df_days['biomass']
     # calcaulte daily avg growth and productivity
-    rolling_bagged, skip_days=get_daily_growths(rolling_tsd_df)
+    rolling_bagged, skip_days=get_daily_growths(rolling_tsd_df, period)
     # specify model
     rolling_tsd_df['model']='Rolling'
     rolling_bagged['model']='Rolling'
